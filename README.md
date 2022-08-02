@@ -1,6 +1,6 @@
 - this project was done by following the AMM and Kitties tutorial on figment
 - The NFT Part works and a pallet for that was created (check the pallet part)
-- The pallet for the AMM was created by following the tutorials on substrate and AMM Tutorial on Figment.
+- The pallet for the AMM was created by following the tutorials on substrate and AMM Tutorial on Figment. The ink part was translated to a pallet :-)
 - There was even i try of tight coupling by following the live coding session of Shawn but i dont think it works as it should be
 
 The project was a total overkill for my current skillset and after the two first days of depression, I started to make some progress.

@@ -2,342 +2,327 @@
 
 pub use pallet::*;
 
+
+#[cfg(test)]
+mod mock;
+
+#[cfg(test)]
+mod tests;
+
+
+
 #[frame_support::pallet]
 pub mod pallet {
 	use frame_support::pallet_prelude::*;
 	use frame_system::pallet_prelude::*;
+	use sp_std::vec::Vec;
 
-	use frame_support::traits::{Currency, Randomness};
-
-	// The basis which we buil
-	#[pallet::pallet]
-	pub struct Pallet<T>(_);
-
-	// Allows easy access our Pallet's `Balance` type. Comes from `Currency` interface.
-	type BalanceOf<T> =
-	<<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
-
-	// The Gender type used in the `Kitty` struct
-	#[derive(Clone, Encode, Decode, PartialEq, Copy, RuntimeDebug, TypeInfo, MaxEncodedLen)]
-	pub enum Gender {
-		Male,
-		Female,
-	}
-
-	// Struct for holding kitty information
-	#[derive(Clone, Encode, Decode, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen, Copy)]
-	#[scale_info(skip_type_params(T))]
-	pub struct Kitty<T: Config> {
-		// Using 16 bytes to represent a kitty DNA
-		pub dna: [u8; 16],
-		// `None` assumes not for sale
-		pub price: Option<BalanceOf<T>>,
-		pub gender: Gender,
-		pub owner: T::AccountId,
-	}
-
-	/// Keeps track of the number of kitties in existence.
-	#[pallet::storage]
-	pub(super) type CountForKitties<T: Config> = StorageValue<_, u64, ValueQuery>;
-
-	/// Maps the kitty struct to the kitty DNA.
-	#[pallet::storage]
-	pub(super) type Kitties<T: Config> = StorageMap<_, Twox64Concat, [u8; 16], Kitty<T>>;
-
-	/// Track the kitties owned by each account.
-	#[pallet::storage]
-	pub(super) type KittiesOwned<T: Config> = StorageMap<
-		_,
-		Twox64Concat,
-		T::AccountId,
-		BoundedVec<[u8; 16], T::MaxKittiesOwned>,
-		ValueQuery,
-	>;
-
-	// Your Pallet's configuration trait, representing custom external types and interfaces.
+	/// Configure the pallet by specifying the parameters and types on which it depends.
 	#[pallet::config]
 	pub trait Config: frame_system::Config {
 		/// Because this pallet emits events, it depends on the runtime's definition of an event.
 		type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
-
-		/// The Currency handler for the kitties pallet.
-		type Currency: Currency<Self::AccountId>;
-
-		/// The maximum amount of kitties a single account can own.
-		#[pallet::constant]
-		type MaxKittiesOwned: Get<u32>;
-
-		/// The type of Randomness we want to specify for this pallet.
-		type KittyRandomness: Randomness<Self::Hash, Self::BlockNumber>;
 	}
 
-	// Your Pallet's events.
 	#[pallet::event]
-	#[pallet::generate_deposit(pub(super) fn deposit_event)]
-	pub enum Event<T: Config> {
-		/// A new kitty was successfully created.
-		Created { kitty: [u8; 16], owner: T::AccountId },
-		/// A kitty was successfully transferred.
-		Transferred { from: T::AccountId, to: T::AccountId, kitty: [u8; 16] },
-		/// The price of a kitty was successfully set.
-		PriceSet { kitty: [u8; 16], price: Option<BalanceOf<T>> },
-		/// A kitty was successfully sold.
-		Sold { seller: T::AccountId, buyer: T::AccountId, kitty: [u8; 16], price: BalanceOf<T> },
-	}
 
-	// Your Pallet's error messages.
 	#[pallet::error]
-	pub enum Error<T> {
-		/// An account may only own `MaxKittiesOwned` kitties.
-		TooManyOwned,
-		/// This kitty already exists!
-		DuplicateKitty,
-		/// An overflow has occurred!
-		Overflow,
-		/// This kitty does not exist!
-		NoKitty,
-		/// You are not the owner of this kitty.
-		NotOwner,
-		/// Trying to transfer or buy a kitty from oneself.
-		TransferToSelf,
-		/// Ensures that the buying price is greater than the asking price.
-		BidPriceTooLow,
-		/// This kitty is not for sale.
-		NotForSale,
+	pub enum Error {
+		/// Zero Liquidity
+		ZeroLiquidity,
+		/// Amount cannot be zero!
+		ZeroAmount,
+		/// Insufficient amount
+		InsufficientAmount,
+		/// Equivalent value of tokens not provided
+		NonEquivalentValue,
+		/// Asset value less than threshold for contribution!
+		ThresholdNotReached,
+		/// Share should be less than totalShare
+		InvalidShare,
+		/// Insufficient pool balance
+		InsufficientLiquidity,
+		/// Slippage tolerance exceeded
+		SlippageExceeded,
 	}
 
-	// Your Pallet's callable functions.
-	#[pallet::call]
-	impl<T: Config> Pallet<T> {
-		/// Create a new unique kitty.
-		///
-		/// The actual kitty creation is done in the `mint()` function.
-		#[pallet::weight(0)]
-		pub fn create_kitty(origin: OriginFor<T>) -> DispatchResult {
-			// Make sure the caller is from a signed origin
-			let sender = ensure_signed(origin)?;
+	#[pallet::storage]
+	pub struct Amm {
+		totalShares: Balance, // Stores the total amount of share issued for the pool
+		totalToken1: Balance, // Stores the amount of Token1 locked in the pool
+		totalToken2: Balance, // Stores the amount of Token2 locked in the pool
+		shares: HashMap<AccountId, Balance>, // Stores the share holding of each provider
+		token1Balance: HashMap<AccountId, Balance>, // Stores the token1 balance of each user
+		token2Balance: HashMap<AccountId, Balance>, // Stores the token2 balance of each user
+		fees: Balance,        // Percent of trading fees charged on trade
+	}
 
-			// Generate unique DNA and Gender using a helper function
-			let (kitty_gen_dna, gender) = Self::gen_dna();
+	#[pallet::weight(0)]
+	impl Amm {
+		// Ensures that the _qty is non-zero and the user has enough balance
+		fn validAmountCheck(
+			&self,
+			_balance: &HashMap<AccountId, Balance>,
+			_qty: Balance,
+		) -> Result<(), Error> {
+			let caller = self.env().caller();
+			let my_balance = *_balance.get(&caller).unwrap_or(&0);
 
-			// Write new kitty to storage by calling helper function
-			Self::mint(&sender, kitty_gen_dna, gender)?;
-
-			Ok(())
+			match _qty {
+				0 => Err(Error::ZeroAmount),
+				_ if _qty > my_balance => Err(Error::InsufficientAmount),
+				_ => Ok(()),
+			}
 		}
 
-		/// Directly transfer a kitty to another recipient.
-		///
-		/// Any account that holds a kitty can send it to another Account. This will reset the
-		/// asking price of the kitty, marking it not for sale.
-		#[pallet::weight(0)]
-		pub fn transfer(
-			origin: OriginFor<T>,
-			to: T::AccountId,
-			kitty_id: [u8; 16],
-		) -> DispatchResult {
-			// Make sure the caller is from a signed origin
-			let from = ensure_signed(origin)?;
-			let kitty = Kitties::<T>::get(&kitty_id).ok_or(Error::<T>::NoKitty)?;
-			ensure!(kitty.owner == from, Error::<T>::NotOwner);
-			Self::do_transfer(kitty_id, to)?;
-			Ok(())
+		// Returns the liquidity constant of the pool
+		fn getK(&self) -> Balance {
+			self.totalToken1 * self.totalToken2
 		}
 
-		/// Set the price for a kitty.
-		///
-		/// Updates kitty price and updates storage.
-		#[pallet::weight(0)]
-		pub fn set_price(
-			origin: OriginFor<T>,
-			kitty_id: [u8; 16],
-			new_price: Option<BalanceOf<T>>,
-		) -> DispatchResult {
-			// Make sure the caller is from a signed origin
-			let sender = ensure_signed(origin)?;
-
-			// Ensure the kitty exists and is called by the kitty owner
-			let mut kitty = Kitties::<T>::get(&kitty_id).ok_or(Error::<T>::NoKitty)?;
-			ensure!(kitty.owner == sender, Error::<T>::NotOwner);
-
-			// Set the price in storage
-			kitty.price = new_price;
-			Kitties::<T>::insert(&kitty_id, kitty);
-
-			// Deposit a "PriceSet" event.
-			Self::deposit_event(Event::PriceSet { kitty: kitty_id, price: new_price });
-
-			Ok(())
-		}
-
-		/// Buy a saleable kitty. The bid price provided from the buyer has to be equal or higher
-		/// than the ask price from the seller.
-		///
-		/// This will reset the asking price of the kitty, marking it not for sale.
-		/// Marking this method `transactional` so when an error is returned, we ensure no storage
-		/// is changed.
-		#[pallet::weight(0)]
-		pub fn buy_kitty(
-			origin: OriginFor<T>,
-			kitty_id: [u8; 16],
-			bid_price: BalanceOf<T>,
-		) -> DispatchResult {
-			// Make sure the caller is from a signed origin
-			let buyer = ensure_signed(origin)?;
-			// Transfer the kitty from seller to buyer as a sale.
-			Self::do_buy_kitty(kitty_id, buyer, bid_price)?;
-
-			Ok(())
+		// Used to restrict withdraw & swap feature till liquidity is added to the pool
+		fn activePool(&self) -> Result<(), Error> {
+			match self.getK() {
+				0 => Err(Error::ZeroLiquidity),
+				_ => Ok(()),
+			}
 		}
 	}
 
-	// Your Pallet's internal functions.
-	impl<T: Config> Pallet<T> {
-		// Generates and returns DNA and Gender
-		fn gen_dna() -> ([u8; 16], Gender) {
-			// Create randomness
-			let random = T::KittyRandomness::random(&b"dna"[..]).0;
-
-			// Create randomness payload. Multiple kitties can be generated in the same block,
-			// retaining uniqueness.
-			let unique_payload = (
-				random,
-				frame_system::Pallet::<T>::extrinsic_index().unwrap_or_default(),
-				frame_system::Pallet::<T>::block_number(),
-			);
-
-			// Turns into a byte array
-			let encoded_payload = unique_payload.encode();
-			let hash = frame_support::Hashable::blake2_128(&encoded_payload);
-
-			// Generate Gender
-			if hash[0] % 2 == 0 {
-				(hash, Gender::Male)
-			} else {
-				(hash, Gender::Female)
-			}
-		}
-
-		// Helper to mint a kitty
-		pub fn mint(
-			owner: &T::AccountId,
-			dna: [u8; 16],
-			gender: Gender,
-		) -> Result<[u8; 16], DispatchError> {
-			// Create a new object
-			let kitty = Kitty::<T> { dna, price: None, gender, owner: owner.clone() };
-
-			// Check if the kitty does not already exist in our storage map
-			ensure!(!Kitties::<T>::contains_key(&kitty.dna), Error::<T>::DuplicateKitty);
-
-			// Performs this operation first as it may fail
-			let count = CountForKitties::<T>::get();
-			let new_count = count.checked_add(1).ok_or(Error::<T>::Overflow)?;
-
-			// Append kitty to KittiesOwned
-			KittiesOwned::<T>::try_append(&owner, kitty.dna)
-				.map_err(|_| Error::<T>::TooManyOwned)?;
-
-			// Write new kitty to storage
-			Kitties::<T>::insert(kitty.dna, kitty);
-			CountForKitties::<T>::put(new_count);
-
-			// Deposit our "Created" event.
-			Self::deposit_event(Event::Created { kitty: dna, owner: owner.clone() });
-
-			// Returns the DNA of the new kitty if this succeeds
-			Ok(dna)
-		}
-
-		// Update storage to transfer kitty
-		pub fn do_transfer(
-			kitty_id: [u8; 16],
-			to: T::AccountId,
-		) -> DispatchResult {
-			// Get the kitty
-			let mut kitty = Kitties::<T>::get(&kitty_id).ok_or(Error::<T>::NoKitty)?;
-			let from = kitty.owner;
-
-			ensure!(from != to, Error::<T>::TransferToSelf);
-			let mut from_owned = KittiesOwned::<T>::get(&from);
-
-			// Remove kitty from list of owned kitties.
-			if let Some(ind) = from_owned.iter().position(|&id| id == kitty_id) {
-				from_owned.swap_remove(ind);
-			} else {
-				return Err(Error::<T>::NoKitty.into())
-			}
-
-			// Add kitty to the list of owned kitties.
-			let mut to_owned = KittiesOwned::<T>::get(&to);
-			to_owned.try_push(kitty_id).map_err(|()| Error::<T>::TooManyOwned)?;
-
-			// Transfer succeeded, update the kitty owner and reset the price to `None`.
-			kitty.owner = to.clone();
-			kitty.price = None;
-
-			// Write updates to storage
-			Kitties::<T>::insert(&kitty_id, kitty);
-			KittiesOwned::<T>::insert(&to, to_owned);
-			KittiesOwned::<T>::insert(&from, from_owned);
-
-			Self::deposit_event(Event::Transferred { from, to, kitty: kitty_id });
-
-			Ok(())
-		}
-
-		// A helper function for purchasing a kitty
-		pub fn do_buy_kitty(
-			kitty_id: [u8; 16],
-			to: T::AccountId,
-			bid_price: BalanceOf<T>,
-		) -> DispatchResult {
-			// Get the kitty
-			let mut kitty = Kitties::<T>::get(&kitty_id).ok_or(Error::<T>::NoKitty)?;
-			let from = kitty.owner;
-
-			ensure!(from != to, Error::<T>::TransferToSelf);
-			let mut from_owned = KittiesOwned::<T>::get(&from);
-
-			// Remove kitty from list of owned kitties.
-			if let Some(ind) = from_owned.iter().position(|&id| id == kitty_id) {
-				from_owned.swap_remove(ind);
-			} else {
-				return Err(Error::<T>::NoKitty.into())
-			}
-
-			// Add kitty to the list of owned kitties.
-			let mut to_owned = KittiesOwned::<T>::get(&to);
-			to_owned.try_push(kitty_id).map_err(|()| Error::<T>::TooManyOwned)?;
-
-			// Mutating state here via a balance transfer, so nothing is allowed to fail after this.
-			if let Some(price) = kitty.price {
-				ensure!(bid_price >= price, Error::<T>::BidPriceTooLow);
-				// Transfer the amount from buyer to seller
-				T::Currency::transfer(&to, &from, price, frame_support::traits::ExistenceRequirement::KeepAlive)?;
-				// Deposit sold event
-				Self::deposit_event(Event::Sold {
-					seller: from.clone(),
-					buyer: to.clone(),
-					kitty: kitty_id,
-					price,
-				});
-			} else {
-				return Err(Error::<T>::NotForSale.into())
-			}
-
-			// Transfer succeeded, update the kitty owner and reset the price to `None`.
-			kitty.owner = to.clone();
-			kitty.price = None;
-
-			// Write updates to storage
-			Kitties::<T>::insert(&kitty_id, kitty);
-			KittiesOwned::<T>::insert(&to, to_owned);
-			KittiesOwned::<T>::insert(&from, from_owned);
-
-			Self::deposit_event(Event::Transferred { from, to, kitty: kitty_id });
-
-			Ok(())
+	#[pallet::weight(0)]
+	pub fn new(_fees: Balance) -> Self {
+		// Sets fees to zero if not in valid range
+		Self {
+			fees: if _fees >= 1000 { 0 } else { _fees },
+			..Default::default()
 		}
 	}
-}
+
+	/// Sends free token(s) to the invoker
+	#[pallet::weight(0)]
+	pub fn faucet(&mut self, _amountToken1: Balance, _amountToken2: Balance) {
+		let caller = self.env().caller();
+		let token1 = *self.token1Balance.get(&caller).unwrap_or(&0);
+		let token2 = *self.token2Balance.get(&caller).unwrap_or(&0);
+
+		self.token1Balance.insert(caller, token1 + _amountToken1);
+		self.token2Balance.insert(caller, token2 + _amountToken2);
+	}
+
+	/// Returns the balance of the user
+	#[pallet::weight(0)]
+	pub fn getMyHoldings(&self) -> (Balance, Balance, Balance) {
+		let caller = self.env().caller();
+		let token1 = *self.token1Balance.get(&caller).unwrap_or(&0);
+		let token2 = *self.token2Balance.get(&caller).unwrap_or(&0);
+		let myShares = *self.shares.get(&caller).unwrap_or(&0);
+		(token1, token2, myShares)
+	}
+
+	/// Returns the amount of tokens locked in the pool,total shares issued & trading fee param
+	#[pallet::weight(0)]
+	pub fn getPoolDetails(&self) -> (Balance, Balance, Balance, Balance) {
+		(
+			self.totalToken1,
+			self.totalToken2,
+			self.totalShares,
+			self.fees,
+		)
+	}
+
+	/// Adding new liquidity in the pool
+	/// Returns the amount of share issued for locking given assets
+	#[pallet::weight(0)]
+	pub fn provide(
+		&mut self,
+		_amountToken1: Balance,
+		_amountToken2: Balance,
+	) -> Result<Balance, Error> {
+		self.validAmountCheck(&self.token1Balance, _amountToken1)?;
+		self.validAmountCheck(&self.token2Balance, _amountToken2)?;
+
+		let share;
+		if self.totalShares == 0 {
+			// Genesis liquidity is issued 100 Shares
+			share = 100 * super::PRECISION;
+		} else {
+			let share1 = self.totalShares * _amountToken1 / self.totalToken1;
+			let share2 = self.totalShares * _amountToken2 / self.totalToken2;
+
+			if share1 != share2 {
+				return Err(Error::NonEquivalentValue);
+			}
+			share = share1;
+		}
+
+		if share == 0 {
+			return Err(Error::ThresholdNotReached);
+		}
+
+		let caller = self.env().caller();
+		let token1 = *self.token1Balance.get(&caller).unwrap();
+		let token2 = *self.token2Balance.get(&caller).unwrap();
+		self.token1Balance.insert(caller, token1 - _amountToken1);
+		self.token2Balance.insert(caller, token2 - _amountToken2);
+
+		self.totalToken1 += _amountToken1;
+		self.totalToken2 += _amountToken2;
+		self.totalShares += share;
+		self.shares
+			.entry(caller)
+			.and_modify(|val| *val += share)
+			.or_insert(share);
+
+		Ok(share)
+	}
+
+	/// Returns amount of Token1 required when providing liquidity with _amountToken2 quantity of Token2
+	#[pallet::weight(0)]
+	pub fn getEquivalentToken1Estimate(
+		&self,
+		_amountToken2: Balance,
+	) -> Result<Balance, Error> {
+		self.activePool()?;
+		Ok(self.totalToken1 * _amountToken2 / self.totalToken2)
+	}
+
+	/// Returns amount of Token2 required when providing liquidity with _amountToken1 quantity of Token1
+	#[pallet::weight(0)]
+	pub fn getEquivalentToken2Estimate(
+		&self,
+		_amountToken1: Balance,
+	) -> Result<Balance, Error> {
+		self.activePool()?;
+		Ok(self.totalToken2 * _amountToken1 / self.totalToken1)
+	}
+
+	/// Returns the estimate of Token1 & Token2 that will be released on burning given _share
+	#[pallet::weight(0)]
+	pub fn getWithdrawEstimate(&self, _share: Balance) -> Result<(Balance, Balance), Error> {
+		self.activePool()?;
+		if _share > self.totalShares {
+			return Err(Error::InvalidShare);
+		}
+
+		let amountToken1 = _share * self.totalToken1 / self.totalShares;
+		let amountToken2 = _share * self.totalToken2 / self.totalShares;
+		Ok((amountToken1, amountToken2))
+	}
+
+	/// Removes liquidity from the pool and releases corresponding Token1 & Token2 to the withdrawer
+	#[pallet::weight(0)]
+	pub fn withdraw(&mut self, _share: Balance) -> Result<(Balance, Balance), Error> {
+		let caller = self.env().caller();
+		self.validAmountCheck(&self.shares, _share)?;
+
+		let (amountToken1, amountToken2) = self.getWithdrawEstimate(_share)?;
+		self.shares.entry(caller).and_modify(|val| *val -= _share);
+		self.totalShares -= _share;
+
+		self.totalToken1 -= amountToken1;
+		self.totalToken2 -= amountToken2;
+
+		self.token1Balance
+			.entry(caller)
+			.and_modify(|val| *val += amountToken1);
+		self.token2Balance
+			.entry(caller)
+			.and_modify(|val| *val += amountToken2);
+
+		Ok((amountToken1, amountToken2))
+	}
+
+	/// Returns the amount of Token2 that the user will get when swapping a given amount of Token1 for Token2
+	#[pallet::weight(0)]
+	pub fn getSwapToken1EstimateGivenToken1(
+		&self,
+		_amountToken1: Balance,
+	) -> Result<Balance, Error> {
+		self.activePool()?;
+		let _amountToken1 = (1000 - self.fees) * _amountToken1 / 1000; // Adjusting the fees charged
+
+		let token1After = self.totalToken1 + _amountToken1;
+		let token2After = self.getK() / token1After;
+		let mut amountToken2 = self.totalToken2 - token2After;
+
+		// To ensure that Token2's pool is not completely depleted leading to inf:0 ratio
+		if amountToken2 == self.totalToken2 {
+			amountToken2 -= 1;
+		}
+		Ok(amountToken2)
+	}
+
+	/// Returns the amount of Token1 that the user should swap to get _amountToken2 in return
+	#[pallet::weight(0)]
+	pub fn getSwapToken1EstimateGivenToken2(
+		&self,
+		_amountToken2: Balance,
+	) -> Result<Balance, Error> {
+		self.activePool()?;
+		if _amountToken2 >= self.totalToken2 {
+			return Err(Error::InsufficientLiquidity);
+		}
+
+		let token2After = self.totalToken2 - _amountToken2;
+		let token1After = self.getK() / token2After;
+		let amountToken1 = (token1After - self.totalToken1) * 1000 / (1000 - self.fees);
+		Ok(amountToken1)
+	}
+
+	/// Swaps given amount of Token1 to Token2 using algorithmic price determination
+	/// Swap fails if Token2 amount is less than _minToken2
+	#[pallet::weight(0)]
+	pub fn swapToken1GivenToken1(
+		&mut self,
+		_amountToken1: Balance,
+		_minToken2: Balance,
+	) -> Result<Balance, Error> {
+		let caller = self.env().caller();
+		self.validAmountCheck(&self.token1Balance, _amountToken1)?;
+
+		let amountToken2 = self.getSwapToken1EstimateGivenToken1(_amountToken1)?;
+		if amountToken2 < _minToken2 {
+			return Err(Error::SlippageExceeded);
+		}
+		self.token1Balance
+			.entry(caller)
+			.and_modify(|val| *val -= _amountToken1);
+
+		self.totalToken1 += _amountToken1;
+		self.totalToken2 -= amountToken2;
+
+		self.token2Balance
+			.entry(caller)
+			.and_modify(|val| *val += amountToken2);
+		Ok(amountToken2)
+	}
+
+	/// Swaps given amount of Token1 to Token2 using algorithmic price determination
+	/// Swap fails if amount of Token1 required to obtain _amountToken2 exceeds _maxToken1
+	#[pallet::weight(0)]
+	pub fn swapToken1GivenToken2(
+		&mut self,
+		_amountToken2: Balance,
+		_maxToken1: Balance,
+	) -> Result<Balance, Error> {
+		let caller = self.env().caller();
+		let amountToken1 = self.getSwapToken1EstimateGivenToken2(_amountToken2)?;
+		if amountToken1 > _maxToken1 {
+			return Err(Error::SlippageExceeded);
+		}
+		self.validAmountCheck(&self.token1Balance, amountToken1)?;
+
+		self.token1Balance
+			.entry(caller)
+			.and_modify(|val| *val -= amountToken1);
+
+		self.totalToken1 += amountToken1;
+		self.totalToken2 -= _amountToken2;
+
+		self.token2Balance
+			.entry(caller)
+			.and_modify(|val| *val += _amountToken2);
+		Ok(amountToken1)
+	}
+
+
